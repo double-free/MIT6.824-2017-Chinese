@@ -299,7 +299,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	fmt.Printf("Schedule: %v phase done\n", phase)
 }
 ```
-显然，这是对多线程编程理解不够深入导致的。脑子里需要时刻有根弦，凡是要修改的数据，都不要共享，否则就记得加锁。另外，channel 操作时，需要小心死锁。
+显然，这是对多线程编程理解不够深入导致的。脑子里需要时刻有根弦，凡是要修改的数据，都不要共享，否则就记得加锁。另外，channel 操作时，需要小心死锁。在这里 registerChan 是在 `Distributed()` 函数中初始化的，是一个无缓冲的 channel，也就是说如果没人来取放入的 worker 就会阻塞，所以必须放在 goroutine 中。
 
 以下是正确的写法。
 ```Go
