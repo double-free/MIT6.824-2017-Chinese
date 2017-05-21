@@ -52,7 +52,7 @@ mrtmp.xxx-1-2
 3. 生成 nReduce 个子文件 A_1, A_2, ..., A_nReduce。
 4. 利用 {Key, Val} 中的 Key 值做哈希，将得到的值对 nReduce 取模，以此为依据将其分配到子文件之中。
 
-```
+```go
 func doMap(
 	jobName string, // the name of the MapReduce job
 	mapTaskNumber int, // which map task this is
@@ -101,7 +101,7 @@ func doMap(
 
 ##### doReduce() 函数
 
-```
+```Go
 func doReduce(
 	jobName string, // the name of the whole MapReduce job
 	reduceTaskNumber int, // which reduce task this is
@@ -164,7 +164,7 @@ func doReduce(
 现在我们将实现一个简单的 Map/Reduce 案例：词频统计。在 `main/wc.go` 中有需要实现的 `mapF()` 以及 `reduceF()` 方法。我们需要完成统计输入文件中每个单词出现频率的功能。
 我们需要将文件名和文件的内容作为参数传递给 `mapF()`，它会把内容分成一个个单词，并返回 {Key, Value} 的 slice。其中，Key 就是单词。`reduceF()` 会处理一个 Key 下的所有 Value，然后返回单词出现总数。
 
-```
+```Go
 func mapF(filename string, contents string) []mapreduce.KeyValue {
 	// TODO: you have to write this function
 	// words := strings.Fields(contents)
@@ -180,7 +180,7 @@ func mapF(filename string, contents string) []mapreduce.KeyValue {
 }
 ```
 
-```
+```Go
 func reduceF(key string, values []string) string {
 	// TODO: you also have to write this function
 	var sum int
@@ -213,7 +213,7 @@ func reduceF(key string, values []string) string {
 
 这是一个比较有含金量的练习。
 `schedule()` 函数的调用发生在 `master.go` 中。首先，在`Distributed()` 中对 `schedule()` 做了一个再封装，使得其只需要一个参数判断是 Map 还是 Reduce。
-```
+```Go
 func Distributed(jobName string, files []string, nreduce int, master string) (mr *Master) {
 	mr = newMaster(master)
 	mr.startRPCServer()
@@ -231,7 +231,7 @@ func Distributed(jobName string, files []string, nreduce int, master string) (mr
 }
 ```
 这里就是实际使用 `schedule()` 的地方。一次用于 Map，一次用于 Reduce。
-```
+```Go
 func (mr *Master) run(jobName string, files []string, nreduce int,
 	schedule func(phase jobPhase),
 	finish func(),
@@ -254,7 +254,7 @@ func (mr *Master) run(jobName string, files []string, nreduce int,
 ```
 了解完调用后，还需要重点了解的是[ RPC 机制](https://golang.org/pkg/net/rpc/)。搞懂 `call()` 的参数形式。
 先上一个错误的写法，该写法导致文件生成不全，程序不能顺利结束：
-```
+```Go
 func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, registerChan chan string) {
 	var ntasks int
 	var n_other int // number of inputs (for reduce) or outputs (for map)
@@ -301,7 +301,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 显然，这是对多线程编程理解不够深入导致的。脑子里需要时刻有根弦，凡是要修改的数据，都不要共享，否则就记得加锁。另外，channel 操作时，需要小心死锁。
 
 以下是正确的写法。
-```
+```Go
 func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, registerChan chan string) {
 	var ntasks int
 	var n_other int // number of inputs (for reduce) or outputs (for map)
@@ -362,7 +362,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 一个 RPC 出错并不一定表示 Worker 没有执行任务，有可能只是 reply 丢失了，或是 Master 的 RPC 超时了。因此，有可能两个 Worker 都完成了同一个任务。同样的任务会生成同样的结果，所以这样并不会引发什么问题。并且，在该 lab 中，每个 Task 都是序列执行的，这就保证了结果的整体性。
 
 实现较简单，将 Part III 中的 goroutine 做小幅度修改即可。加入无线循环使得在 call 返回 false 的时候另选一个 worker 重试，返回 true 的时候将 worker 放回 ch，跳出循环。
-```
+```Go
 ...
 		go func() {
 			// fmt.Printf("Now: %dth task\n", task_id)
@@ -390,7 +390,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 ```
 相比 Part II 中的词频统计，思想是类似的。
 首先在 mapF 里对文件的内容分词，维护一个哈希表，Key 是单词，Value 是文件名。这样可以去掉重复的词。最后再把哈希表转为输出要求的格式。
-```
+```Go
 func mapF(document string, value string) (res []mapreduce.KeyValue) {
 	// TODO: you should complete this to do the inverted index challenge
 	f := func(c rune) bool {
@@ -411,7 +411,7 @@ func mapF(document string, value string) (res []mapreduce.KeyValue) {
 ```
 mapF 返回的数组会经过哈希处理分配到 nReduce 个文件中。doReduce 则会将隶属于同样的 reduce_task_id 的文件的 {key, val} 整合为 {key, []val}。在本例中就相当于 {单词，[]文件名}。
 在 reduceF 里主要是对每个 key 下的所有 value 进行处理。注意，它并不负责输出，只负责返回一个 newVal，最后由 doReduce 统一以 {key, newVal} 形式输出。因此我们只需要把 []文件名 进行排序后，按要求格式转为一个 string 即可。
-```
+```Go
 func reduceF(key string, values []string) string {
 	// TODO: you should complete this to do the inverted index challenge
 	nDoc := len(values)
