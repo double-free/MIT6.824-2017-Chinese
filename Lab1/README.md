@@ -21,6 +21,7 @@ mrtmp.xxx-1-1
 mrtmp.xxx-1-2
 ```
 每个 Worker 必须能够读取其他 Worker 写入的文件（信息共享）。真正的分布式系统会使用分布式存储来实现不同机器之间的共享，在这里我们将所有的 Workers 运行在 **一台电脑上**，并使用本地文件系统。
+
 4. 此后 Master 会调用 `common_reduce.go/doReduce()`，与 `doMap()` 一样，它也能直接完成或者通过工人完成。`doReduce()` 将按照 reduce task 编号来汇总，生成 `nReduce` 个结果文件。例如上面的例子中按照如下分组进行汇总：
 ```
   // reduce task 0
