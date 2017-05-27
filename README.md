@@ -14,6 +14,6 @@
 
 进度
 ---
-- [x] Lab1: mapreduce
-- [ ] Lab2: Raft
-- [ ] Lab3: KV Raft
+- [x] **Lab1: mapreduce**
+- [ ] **Lab2: Raft**
+- [ ] **Lab3: KV Raft**
