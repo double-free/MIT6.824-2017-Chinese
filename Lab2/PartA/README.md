@@ -117,7 +117,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 ![转化过程.png](http://upload-images.jianshu.io/upload_images/4482847-a56d75f416c97ed8.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240)
 
 Raft 算法的几个重要的思想也列举一下我的实现。
+
 1. **随机的 election timeout**
+
 主要是每个 raft 设置了一个 timer。初始化结束后就开始计时，然后进入主循环。此后在合适的时机 reset。
 ```go
 // rand[min, max]
@@ -133,7 +135,9 @@ func (rf *Raft) randResetTimer() {
 	}
 }
 ```
+
 2. **CANDIDATE 开启投票以及处理投票结果**
+
 注意所有的 RPC 都应该是并发的。
 ```go
 func (rf *Raft) startElection() {
