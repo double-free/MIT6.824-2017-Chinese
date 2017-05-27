@@ -11,3 +11,9 @@
 * Go 语言自从 GC 问题解决后，性能非常出色，值得深入了解
 
 那么，开始吧。
+
+进度
+---
+- [x] Lab1: mapreduce
+- [ ] Lab2: Raft
+- [ ] Lab3: KV Raft
