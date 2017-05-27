@@ -220,6 +220,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 ```
 
 4. **发送心跳包**
+
 由于还没有加入 log，这里的逻辑还是很简单的。
 ```go
 func (rf *Raft) broadcastAppendEntries() {
