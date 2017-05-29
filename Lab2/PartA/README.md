@@ -182,9 +182,6 @@ func (rf *Raft) startElection() {
 ```go
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	// 在这里加锁导致死锁
-	// 因为这个 goroutine 想要往 votech 里写东西
-	// 而 Make 中的 goroutine 想要读
 	/*
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
