@@ -25,8 +25,8 @@ import "labrpc"
 
 import (
 	"fmt"
-	"time"
 	"math/rand"
+	"time"
 )
 
 //
@@ -46,7 +46,7 @@ const (
 	CANDIDATE
 	LEADER
 
-	HEARTBEAT_INTERVAL = 100 * time.Millisecond
+	HEARTBEAT_INTERVAL    = 100 * time.Millisecond
 	MIN_ELECTION_INTERVAL = 400
 	MAX_ELECTION_INTERVAL = 500
 )
@@ -65,17 +65,17 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// persistent state
-	currentTerm int	// 当前任期
-	votedFor int	// 投票给了谁
+	currentTerm int // 当前任期
+	votedFor    int // 投票给了谁
 
-	state int	// 目前自己是 FOLLOWER, CANDIDATE 还是 LEADER
+	state int // 目前自己是 FOLLOWER, CANDIDATE 还是 LEADER
 
-	electionTimer *time.Timer	// timer
+	electionTimer *time.Timer // timer
 
 	appendCh chan bool
-	voteCh chan bool
+	voteCh   chan bool
 
-	voteCount int	// rf.me 收到的选票
+	voteCount int // rf.me 收到的选票
 }
 
 // return currentTerm and whether this server
@@ -86,7 +86,7 @@ func (rf *Raft) GetState() (int, bool) {
 	var isleader bool
 	// Your code here (2A).
 	term = rf.currentTerm
-	if (rf.state == LEADER) {
+	if rf.state == LEADER {
 		isleader = true
 	}
 	return term, isleader
@@ -123,16 +123,13 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Term int
+	Term        int
 	CandidateId int
 }
 
@@ -142,8 +139,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	Term int
-	VoteGranted bool	// 收到了对CandidateId的投票
+	Term        int
+	VoteGranted bool // 收到了对CandidateId的投票
 }
 
 //
@@ -155,17 +152,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 因为这个 goroutine 想要往 votech 里写东西
 	// 而 Make 中的 goroutine 想要读
 	/*
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
 	*/
 
-	if (args.Term < rf.currentTerm) {
+	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		return
 	}
 
-	if (args.Term > rf.currentTerm) {
+	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.updateStateTo(FOLLOWER)
 		// if it's a new term, just vote for the first candidate
@@ -173,7 +170,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	reply.Term = rf.currentTerm
 
-	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
+	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		// first come first served
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
@@ -191,22 +188,22 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
  *****************/
 
 type AppendEntriesArgs struct {
-	Term int
+	Term     int
 	LeaderId int
 }
 
 type AppendEntriesReply struct {
-	Term int
+	Term    int
 	Success bool
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	if (args.Term < rf.currentTerm) {
+	if args.Term < rf.currentTerm {
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
 	}
-	if (args.Term > rf.currentTerm) {
+	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.updateStateTo(FOLLOWER)
 	}
@@ -214,7 +211,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 	go func() {
 		DPrintf("server %d(Term = %d) received AppendEntries from LEADER %d(Term = %d)\n",
-						 rf.me, rf.currentTerm, args.LeaderId, args.Term)
+			rf.me, rf.currentTerm, args.LeaderId, args.Term)
 		rf.appendCh <- true
 	}()
 
@@ -259,7 +256,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -279,7 +275,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -311,7 +306,7 @@ func randInt64InRange(min, max int64) int64 {
 }
 
 func (rf *Raft) randResetTimer() {
-	if (rf.electionTimer == nil) {
+	if rf.electionTimer == nil {
 		rf.electionTimer = time.NewTimer(time.Duration(randInt64InRange(MIN_ELECTION_INTERVAL, MAX_ELECTION_INTERVAL)) * time.Millisecond)
 	} else {
 		rf.electionTimer.Reset(time.Duration(randInt64InRange(MIN_ELECTION_INTERVAL, MAX_ELECTION_INTERVAL)) * time.Millisecond)
@@ -340,7 +335,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			switch rf.state {
 			case FOLLOWER:
 				select {
-					// 阻塞直到其中一个 case 成立
+				// 阻塞直到其中一个 case 成立
 				case <-rf.appendCh:
 					DPrintf("received append request, reset timer for server %d.\n", rf.me)
 					rf.randResetTimer()
@@ -350,7 +345,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				case <-rf.electionTimer.C:
 					// 超时
 					rf.updateStateTo(CANDIDATE)
-					rf.startElection();
+					rf.startElection()
 					fmt.Printf("server %d become CANDIDATE, term = %d\n", rf.me, rf.currentTerm)
 				}
 			case CANDIDATE:
@@ -362,20 +357,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				case <-rf.electionTimer.C:
 					// 超时，新一轮选举
 					DPrintf("New Election Started...")
-					rf.startElection();
+					rf.startElection()
 				default:
 					// avoid race
 					// if (rf.voteCount > len(rf.peers)/2) {
 					var win bool
 					rf.mu.Lock()
-					if (rf.voteCount > len(rf.peers)/2) {
+					if rf.voteCount > len(rf.peers)/2 {
 						win = true
 					}
 					rf.mu.Unlock()
-					if (win == true) {
+					if win == true {
 						// 赢得选举
 						fmt.Printf("server %d got %d out of %d vote, become LEADER, term = %d\n",
-							 					rf.me, rf.voteCount, len(rf.peers), rf.currentTerm)
+							rf.me, rf.voteCount, len(rf.peers), rf.currentTerm)
 						rf.updateStateTo(LEADER)
 						// rf.maintainAuthority()
 					} else {
@@ -392,7 +387,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-
 	return rf
 }
 
@@ -400,28 +394,28 @@ func (rf *Raft) startElection() {
 	// this function is called when a follower becomes a candidate
 	rf.mu.Lock()
 	rf.currentTerm += 1
-	rf.votedFor = rf.me	// vote for self
+	rf.votedFor = rf.me // vote for self
 	rf.voteCount = 1
-	rf.randResetTimer()	// reset timer
+	rf.randResetTimer() // reset timer
 	rf.mu.Unlock()
 	args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me}
 
-	for i,_ := range rf.peers {
+	for i, _ := range rf.peers {
 		// skip self
-		if (i == rf.me) {
+		if i == rf.me {
 			continue
 		}
 		// every reply is different, so put it in goroutine
-		go func (server int)  {
+		go func(server int) {
 			var reply RequestVoteReply
-			if (rf.sendRequestVote(server, &args, &reply)) {
+			if rf.sendRequestVote(server, &args, &reply) {
 				if reply.VoteGranted == true {
 					rf.mu.Lock()
 					rf.voteCount += 1
 					rf.mu.Unlock()
 				} else {
 					// response contains Term > currentTerm
-					if (reply.Term > rf.currentTerm) {
+					if reply.Term > rf.currentTerm {
 						rf.mu.Lock()
 						rf.currentTerm = reply.Term
 						rf.updateStateTo(FOLLOWER)
@@ -435,18 +429,18 @@ func (rf *Raft) startElection() {
 
 func (rf *Raft) broadcastAppendEntries() {
 	args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me}
-	for i,_ := range rf.peers {
-		if (i == rf.me) {
+	for i, _ := range rf.peers {
+		if i == rf.me {
 			// skip self
 			continue
 		}
-		go func (server int) {
+		go func(server int) {
 			var reply AppendEntriesReply
 			if rf.sendAppendEntries(server, &args, &reply) {
 				if reply.Success == true {
 
 				} else {
-					if (reply.Term > rf.currentTerm) {
+					if reply.Term > rf.currentTerm {
 						rf.mu.Lock()
 						rf.currentTerm = reply.Term
 						rf.updateStateTo(FOLLOWER)
@@ -459,7 +453,7 @@ func (rf *Raft) broadcastAppendEntries() {
 }
 
 func (rf *Raft) updateStateTo(state int) {
-	if (state == rf.state) {
+	if state == rf.state {
 		return
 	}
 	stateDesc := []string{"FOLLOWER", "CANDIDATE", "LEADER"}
@@ -475,5 +469,5 @@ func (rf *Raft) updateStateTo(state int) {
 		fmt.Printf("Warning: invalid state %d, do nothing.\n", state)
 	}
 	fmt.Printf("In term %d: Server %d transfer from %s to %s\n",
-		 				rf.currentTerm, rf.me, stateDesc[preState], stateDesc[rf.state])
+		rf.currentTerm, rf.me, stateDesc[preState], stateDesc[rf.state])
 }
