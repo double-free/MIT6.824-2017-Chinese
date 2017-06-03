@@ -362,7 +362,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 
 一个 RPC 出错并不一定表示 Worker 没有执行任务，有可能只是 reply 丢失了，或是 Master 的 RPC 超时了。因此，有可能两个 Worker 都完成了同一个任务。同样的任务会生成同样的结果，所以这样并不会引发什么问题。并且，在该 lab 中，每个 Task 都是序列执行的，这就保证了结果的整体性。
 
-实现较简单，将 Part III 中的 goroutine 做小幅度修改即可。加入无线循环使得在 call 返回 false 的时候另选一个 worker 重试，返回 true 的时候将 worker 放回 ch，跳出循环。
+实现较简单，将 Part III 中的 goroutine 做小幅度修改即可。加入无限循环使得在 call 返回 false 的时候另选一个 worker 重试，返回 true 的时候将 worker 放回 ch，跳出循环。
 ```Go
 ...
 		go func() {
