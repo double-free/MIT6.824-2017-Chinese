@@ -304,3 +304,6 @@ Test (2B): leader backs up quickly over incorrect follower logs ...
 exit status 1
 FAIL	raft	25.682s
 ```
+总结
+---
+这部分应该是 Lab2 的核心了。难度比较高，调试起来也复杂，重点还是多用 printf 输出观察，没有别的捷径。
