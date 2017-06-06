@@ -189,6 +189,7 @@ if reply.Term > rf.currentTerm {
 3. **applyCh 阻塞**
 
 代码重构了一次，忘了初始化 rf.applyCh。第二次遇到这类问题了。
+
 4. **能通过 BasicAgree, 不能通过 FailAgree**
 
 查了很久，发现原因在更新 commitIndex 上。Leader 自身还有一票，所以 count 应该初始化为 1。
