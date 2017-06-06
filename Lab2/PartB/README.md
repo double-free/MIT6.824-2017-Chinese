@@ -34,9 +34,13 @@ LeaderCommit int
 理解与实现
 ---
 首先需要深刻理解的是运作流程。其中涉及到几个状态的理解。
-- committed
+
+- **committed**
+
 其含义是，该分布式系统 log 中已经达成一致的部分。是可以进行下一步 apply 的部分。
-- applied
+
+- **applied**
+
 已经committed，并发送到 applyCh 信道的 log 部分。
 
 client 通过 `Start()` 指派指令，Leader 收到指令后，只是将其追加到 log 中，暂时不发送，直到下一次 `broadcastAppendEntries()` 时再发送。也就是说，是凭借心跳包发出的。如果这个时段没有追加新指令，则就是单纯的心跳包，否则就是带了数据的。
@@ -103,6 +107,7 @@ return -1
 问题记录
 ---
 1. **RPC 参数传递出现 nil 指针**
+
 ```
 args at 0x0, reply at 0xc420011f50
 panic: runtime error: invalid memory address or nil pointer dereference
@@ -117,6 +122,7 @@ Command interface{} // 数据类型与 Start() 函数的参数一致
 ```
 
 2. **没有正确处理 AppendEntries 返回 false 时的情况**
+
 ```go
 /*
 这样判断有一个很大的问题。由于 Leader 是并发的，会收到好几个 follower 的答复
@@ -139,8 +145,10 @@ goto LOOP
 }
 ```
 3. **applyCh 阻塞**
+
 代码重构了一次，忘了初始化 rf.applyCh。第二次遇到这类问题了。
 4. **能通过 BasicAgree, 不能通过 FailAgree**
+
 查了很久，发现原因在更新 commitIndex 上。Leader 自身还有一票，所以 count 应该初始化为 1。
 ```
 // Part B: update rf.commitIndex
@@ -164,7 +172,9 @@ break
 ```
 这里有人可能会问，为什么不在更新 follower 的 nextIndex 和 matchIndex 时顺便更新 Leader 的，避免这里的特殊处理？
 原因在于，每个 follower 的进度都不一样，到底按照谁的来更新呢？取最大当然可行，但是太麻烦了。本质上，Leader 的数据总是 up-to-date 的，所以这样处理比较好。
+
 5. **通过了 FailAgree 的 105，但是 106 开始 Fail**
+
 出现的状况是无法选举出 Leader。于是在 vote 过程排查。发现又是一个低级错误，在 `startElection()` 函数中忘了初始化两个新的field。细节，细节，细节。
 ```
 args := RequestVoteArgs{}
@@ -174,7 +184,9 @@ args.CandidateId = rf.me
 args.LastLogIndex = rf.lastLogIndex()
 args.LastLogTerm = rf.log[rf.lastLogIndex()].Term
 ```
+
 6. **无法通过 TestRejoin2B 的 103**
+
 该测试场景是当 Leader 断开又重连时，系统能否正常运作。
 分析 log 发现旧的 Leader (假设为 leader0) 重连后改变了某个 Follower 的 log，这本来是不该发生的。查错发现，leader0 重连后，由于自身状态还是 Leader，会发送心跳包。第一个心跳包返回后，会修改 leader0 的 Term 为现在的 term，并将其转为 follower。然而，由于并发，另一个心跳包返回时，该 leader 的currentTerm 已经是最新了，而由于这时没有判断 state == LEADER，所以直接进入了 log 复制环节。
 ```
@@ -229,7 +241,9 @@ fmt.Printf("Network Error, Leader %d cannot reach server %d\n", rf.me, server)
 }
 }
 ```
+
 7. **有时无法通过 TestBackup2B**
+
 偶尔才出现，不好排查。暂时作为遗留问题。
 如下：
 ```
