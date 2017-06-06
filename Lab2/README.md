@@ -11,4 +11,4 @@ Raft 管理了服务的状态副本，它能帮助服务从一堆状态中选出
 
 有一个[动画资料](http://thesecretlivesofdata.com/raft/)，可以参考一下
 
-本章内容较多，报告将分为三个部分：[PartA](https://github.com/double-free/MIT6.824-2017-Chinese/tree/master/Lab2/PartA), PartB, PartC
+本章内容较多，报告将分为三个部分：[PartA](https://github.com/double-free/MIT6.824-2017-Chinese/tree/master/Lab2/PartA), [PartB](https://github.com/double-free/MIT6.824-2017-Chinese/tree/master/Lab2/PartB), PartC
