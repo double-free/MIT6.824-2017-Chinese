@@ -15,5 +15,5 @@
 进度
 ---
 - [x] **Lab1: mapreduce**
-- [ ] **Lab2: Raft**
+- [ ] **Lab2: Raft (Part C 施工中)**
 - [ ] **Lab3: KV Raft**
