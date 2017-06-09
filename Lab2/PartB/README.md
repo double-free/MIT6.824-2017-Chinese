@@ -308,9 +308,13 @@ FAIL	raft	25.682s
 **原因(更新于 2017.06.09)**
 
 找了一晚上，终于发现了 bug 的原因。
+
 由于之前 offline 的服务器中存在 leader，后来再次接入的瞬间，整个网络存在两个自认为是 leader 的节点。旧的 leader 也会发送 AppendEntries，而某些节点接受了旧的 leader 的心跳包，改写了自己的 log。
+
 原则上这是不应该发生的。因为旧的 leader 肯定 Term 也是旧的，发出的心跳包直接返回了。
+
 但是一定要注意，这里是并行场景。
+
 之前的代码结构为：
 ```go
 func (rf *Raft) broadcastAppendEntries() {
@@ -330,6 +334,7 @@ func (rf *Raft) broadcastAppendEntries() {
 ```
 虽然当时意识到 server 的状态是 volatile 的，但是理解还不够深入，导致在错误的地方进行检查。实际上在那里添加检查毫无用处。
 也就是说，很有可能出现如下的情况：
+
 goroutine A 是最先获得 RPC 返回的，因此会发现旧 leader 的 Term 过时了，将其转为 follower。
 ```go
 ...
@@ -359,6 +364,7 @@ if rf.sendAppendEntries(server, &args, &reply) {
 }
 ```
 这时候就会发生一个尴尬的状况，旧的 LEADER 的 Term 已经更新到最新，实际已经成为了 FOLLOWER，但是还是发送出了心跳包。那么作为 follower 肯定就无法甄别旧 leader 和新 leader 了。导致了出错。
+
 实际上应该在发起RPC时添加校验：
 ```
 // 每次发送 RPC 之前，都要确保自己是 LEADER
