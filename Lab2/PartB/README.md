@@ -304,6 +304,71 @@ Test (2B): leader backs up quickly over incorrect follower logs ...
 exit status 1
 FAIL	raft	25.682s
 ```
+
+**原因(更新于 2017.06.09)**
+
+找了一晚上，终于发现了 bug 的原因。
+由于之前 offline 的服务器中存在 leader，后来再次接入的瞬间，整个网络存在两个自认为是 leader 的节点。旧的 leader 也会发送 AppendEntries，而某些节点接受了旧的 leader 的心跳包，改写了自己的 log。
+原则上这是不应该发生的。因为旧的 leader 肯定 Term 也是旧的，发出的心跳包直接返回了。
+但是一定要注意，这里是并行场景。
+之前的代码结构为：
+```go
+func (rf *Raft) broadcastAppendEntries() {
+	for i, _ := range rf.peers {
+		if rf.state != LEADER {
+			// 状态随时都可能被其他 goroutine 修改
+			// 但是在这里执行检查时没有用的
+			return
+		}
+		if i == rf.me {
+			// skip self
+			continue
+		}
+		// 对每个 server 进行 RPC
+		go func(server int) {
+			...
+```
+虽然当时意识到 server 的状态是 volatile 的，但是理解还不够深入，导致在错误的地方进行检查。实际上在那里添加检查毫无用处。
+也就是说，很有可能出现如下的情况：
+goroutine A 是最先获得 RPC 返回的，因此会发现旧 leader 的 Term 过时了，将其转为 follower。
+```go
+...
+if reply.Term > rf.currentTerm {
+	// fail because of outdate
+	DPrintf("Leader %d outdate to follower %d, (Term %d < %d)...\n", rf.me, server, rf.currentTerm, reply.Term)
+	rf.mu.Lock()
+	rf.currentTerm = reply.Term
+	rf.updateStateTo(FOLLOWER)
+	rf.mu.Unlock()
+}
+...
+```
+但是另一个 goroutine B 已经通过了最初的校验顺利开启，而且认为自己仍然是 LEADER。于是照常进行下一步初始化参数，并发起 RPC。
+```go
+...
+args.Term = rf.currentTerm  // 这里的 currentTerm 已经被 goroutine A 更新过
+args.LeaderId = rf.me
+args.PrevLogIndex = rf.nextIndex[server] - 1
+args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+args.LeaderCommit = rf.commitIndex
+if rf.lastLogIndex() >= rf.nextIndex[server] {
+	args.Entries = rf.log[rf.nextIndex[server]:]
+}
+if rf.sendAppendEntries(server, &args, &reply) {
+	...
+}
+```
+这时候就会发生一个尴尬的状况，旧的 LEADER 的 Term 已经更新到最新，实际已经成为了 FOLLOWER，但是还是发送出了心跳包。那么作为 follower 肯定就无法甄别旧 leader 和新 leader 了。导致了出错。
+实际上应该在发起RPC时添加校验：
+```
+// 每次发送 RPC 之前，都要确保自己是 LEADER
+if rf.state == LEADER && rf.sendAppendEntries(server, &args, &reply) {
+	...
+}
+```
+再引申一下，有没有可能判断完了 `rf.state == LEADER` 成功后，被修改为 FOLLOWER，然后又执行了 RPC 呢？
+当然可能，但是这是无所谓的，因为参数 `args` 已经确定了。 args.Term 是它尚在 LEADER 期时确定的，也就是说 Term 肯定不是最新的。
+
 总结
 ---
 这部分应该是 Lab2 的核心了。难度比较高，调试起来也复杂，重点还是多用 printf 输出观察，没有别的捷径。
