@@ -194,7 +194,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		upToDate = true
 	} else {
 		upToDate = false
-		DPrintf("Candidate %d's log is out of date: %d(Term %d), follower %d has %d(Term %d)\n",
+		DPrintf("Candidate %d's log is out of date: (Index %d, Command %v), follower %d has (Index %d, Term %d)\n",
 			args.CandidateId, args.LastLogIndex, args.LastLogTerm, rf.me, rf.lastLogIndex(), followerLastTerm)
 	}
 
@@ -261,11 +261,12 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	// optimization described in 5.3
+	NextIndexTrial int // for update leader's nextIndex slice
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	if args.Term < rf.currentTerm {
-		DPrintf("Leader %d outdate to follower %d, (Term %d < %d)...\n", args.LeaderId, rf.me, args.Term, rf.currentTerm)
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
@@ -277,18 +278,37 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	reply.Term = rf.currentTerm
 
-	if rf.lastLogIndex() < args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		DPrintf("Follower %d: log unmatched, require Index %d in Term %d, mine is %d\n",
-			rf.me, args.PrevLogIndex, args.PrevLogTerm,
+	if args.Entries != nil {
+		DPrintf("Follower %d: leader %d require Index %d in Term %d, mine is %d\n",
+			rf.me, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm,
 			func() int {
 				if rf.lastLogIndex() < args.PrevLogIndex {
 					return -1
 				}
 				return rf.log[args.PrevLogIndex].Term
 			}())
-		reply.Success = false
-		// 既然发送者仍然是合格的 Leader, 我们是否需要当作心跳包处理?
+	}
 
+	if rf.lastLogIndex() < args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.Success = false
+
+		if rf.lastLogIndex() < args.PrevLogIndex {
+			reply.NextIndexTrial = rf.lastLogIndex() + 1
+		} else {
+			// Find the first index of the term
+			// example:
+			// if args.PrevLogIndex = 5, args.PrevLogTerm = 3
+			// and follower's log(only show term): [1, 1, 1, 2, 2]
+			// then the NextIndexTrial should set to the first index of term 2, that is 4
+			followerTerm := rf.log[args.PrevLogIndex].Term
+			var i int
+			for i = args.PrevLogIndex; rf.log[i].Term == followerTerm; i-- {
+				// 循环过后 i 在上一个 term 的最后一个 index
+			}
+			reply.NextIndexTrial = i + 1
+		}
+
+		// 既然发送者仍然是合格的 Leader, 我们是否需要当作心跳包处理?
 		rf.appendCh <- true
 
 		return
@@ -298,25 +318,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// log replication
 	// Lock is expensive, so if there is no Entries, just skip
 	if args.Entries != nil {
-		var conflict bool
+		conflictIdx := -1 // 顺便记录冲突的index, 不用 bool
 		rf.mu.Lock()
 		if rf.lastLogIndex() < args.PrevLogIndex+len(args.Entries) {
 			// 长度不够，作为冲突处理
-			conflict = true
+			conflictIdx = args.PrevLogIndex + 1
 		} else {
 			for i, _ := range args.Entries {
 				idx := args.PrevLogIndex + 1 + i
 				if rf.log[idx].Term != args.Entries[i].Term {
-					conflict = true
+					conflictIdx = idx
 					break
 				}
 			}
 		}
-		if conflict {
+		if conflictIdx > 0 {
 			rf.log = rf.log[:args.PrevLogIndex+1]
 			rf.log = append(rf.log, args.Entries...)
+			DPrintf("Follower %d: conflict in %d, truncate log from %d to %d\n",
+				rf.me, conflictIdx, args.PrevLogIndex+1, args.PrevLogIndex+len(args.Entries))
 		}
-		DPrintf("Follower %d: matched log update to (%d / %d)\n", rf.me, args.PrevLogIndex+len(args.Entries), rf.lastLogIndex())
+		DPrintf("Follower %d: matched log update to (%d / %d) by Leader %d\n",
+			rf.me, args.PrevLogIndex+len(args.Entries), rf.lastLogIndex(), args.LeaderId)
 		rf.mu.Unlock()
 	}
 
@@ -363,7 +386,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.mu.Lock()
 		index = len(rf.log)
 		rf.log = append(rf.log, LogEntry{Index: index, Term: term, Command: command})
-		// DPrintf("Append 1 entry to leader %d, log update to %s\n", rf.me, rf.logToString())
+		DPrintf("Append [%v] to leader %d, log update to %s\n", command, rf.me, rf.logToString())
 		rf.mu.Unlock()
 	}
 	return index, term, isLeader
@@ -513,7 +536,9 @@ func (rf *Raft) applyLog() {
 
 	if rf.commitIndex > rf.lastApplied {
 		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-			rf.applyCh <- ApplyMsg{Index: i, Command: rf.log[i].Command}
+			msg := ApplyMsg{Index: i, Command: rf.log[i].Command}
+			rf.applyCh <- msg
+			DPrintf("\tServer %d applied %v \n", rf.me, msg)
 		}
 		DPrintf("Server %d applied %d entry, now (%d / %d)\n",
 			rf.me, rf.commitIndex-rf.lastApplied, rf.commitIndex, rf.lastLogIndex())
@@ -598,13 +623,7 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) broadcastAppendEntries() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	for i, _ := range rf.peers {
-		if rf.state != LEADER {
-			// 状态随时都可能被其他 goroutine 修改
-			return
-		}
 		if i == rf.me {
 			// skip self
 			continue
@@ -621,8 +640,8 @@ func (rf *Raft) broadcastAppendEntries() {
 			if rf.lastLogIndex() >= rf.nextIndex[server] {
 				args.Entries = rf.log[rf.nextIndex[server]:]
 			}
-			// fmt.Printf("Current Leader log: %s\n", rf.logToString())
-			if rf.sendAppendEntries(server, &args, &reply) {
+			// 每次发送 RPC 之前，都要确保自己是 LEADER
+			if rf.state == LEADER && rf.sendAppendEntries(server, &args, &reply) {
 				// fmt.Printf("Leader %d send heartbeat to %d\n", rf.me, server)
 				if reply.Success == true {
 					rf.nextIndex[server] += len(args.Entries)
@@ -649,10 +668,9 @@ func (rf *Raft) broadcastAppendEntries() {
 					*/
 					if reply.Term > rf.currentTerm {
 						// fail because of outdate
-						rf.mu.Lock()
+						DPrintf("Leader %d outdate to follower %d, (Term %d < %d)...\n", rf.me, server, rf.currentTerm, reply.Term)
 						rf.currentTerm = reply.Term
 						rf.updateStateTo(FOLLOWER)
-						rf.mu.Unlock()
 					}
 					// 非常关键的判断，不加会导致过时的 Leader 仍然能进行 log replication
 					if rf.state != LEADER {
@@ -661,7 +679,7 @@ func (rf *Raft) broadcastAppendEntries() {
 					// 如果返回 false, 而且不是因为 Term 过时，则肯定是 log 不匹配
 					// fail because of log inconsistency
 					// decrement nextIndex and retry
-					rf.nextIndex[server] -= 1
+					rf.nextIndex[server] = reply.NextIndexTrial
 					DPrintf("Leader %d: duplicate to follower %d failed, retry from %d...\n", rf.me, server, rf.nextIndex[server])
 					goto LOOP
 				}
