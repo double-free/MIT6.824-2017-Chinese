@@ -19,97 +19,56 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	currentTerm int	// 当前任期
-	votedFor int	// 投票给了谁
+	votedFor     int
+	voteAcquired int
+	state        int32
+	currentTerm  int32
 
-	state int	// 目前自己是 FOLLOWER, CANDIDATE 还是 LEADER
-
-	electionTimer *time.Timer	// timer
-
-	appendCh chan bool
-	voteCh chan bool
-
-	voteCount int	// rf.me 收到的选票
+	electionTimer *time.Timer
+	voteCh        chan struct{} // 成功投票的信号
+	appendCh      chan struct{} // 成功更新 log 的信号
 }
 ```
 下面重点分析一下主循环，这张图的主要逻辑根据 Figure 2 的 Rules for Servers 得到。它反映了 Raft 算法的本质。每个 server 都在运行同样的循环，根据此刻自身不同的 state 选择不同的行动方式。
 ```go
-func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
-
-	// Your initialization code here (2A, 2B, 2C).
-	// 设为 -1，因为 server 编号从 0 开始
-	rf.votedFor = -1
-	rf.state = FOLLOWER
-	// 必须初始化，即使是无缓冲的 channel
-	// 否则一直无法收到数据
-	rf.appendCh = make(chan bool)
-	rf.voteCh = make(chan bool)
-
-	rf.randResetTimer()
-	go func() {
-		for {
-			switch rf.state {
-			case FOLLOWER:
-				select {
-					// 阻塞直到其中一个 case 成立
-				case <-rf.appendCh:
-					DPrintf("received append request, reset timer for server %d.\n", rf.me)
-					rf.randResetTimer()
-				case <-rf.voteCh:
-					DPrintf("received vote request, reset timer for server %d.\n", rf.me)
-					rf.randResetTimer()
-				case <-rf.electionTimer.C:
-					// 超时
-					rf.updateStateTo(CANDIDATE)
-					rf.startElection();
-					fmt.Printf("server %d become CANDIDATE, term = %d\n", rf.me, rf.currentTerm)
-				}
-			case CANDIDATE:
-				select {
-				case <-rf.appendCh:
-					// 其他服务器已经成为 LEADER
-					DPrintf("server %d become FOLLOWER", rf.me)
-					rf.updateStateTo(FOLLOWER)
-				case <-rf.electionTimer.C:
-					// 超时，新一轮选举
-					DPrintf("New Election Started...")
-					rf.startElection();
-				default:
-					// avoid race
-					// if (rf.voteCount > len(rf.peers)/2) {
-					var win bool
-					rf.mu.Lock()
-					if (rf.voteCount > len(rf.peers)/2) {
-						win = true
-					}
-					rf.mu.Unlock()
-					if (win == true) {
-						// 赢得选举
-						fmt.Printf("server %d got %d out of %d vote, become LEADER, term = %d\n",
-							 					rf.me, rf.voteCount, len(rf.peers), rf.currentTerm)
-						rf.updateStateTo(LEADER)
-						// rf.maintainAuthority()
-					} else {
-						// DPrintf("server %d only got %d out of %d vote ,remain CANDIDATE\n", rf.me, rf.voteCount, len(rf.peers))
-					}
-				}
-			case LEADER:
-				rf.broadcastAppendEntries()
-				time.Sleep(HEARTBEAT_INTERVAL)
+func (rf *Raft) startLoop() {
+	rf.electionTimer = time.NewTimer(randElectionDuration())
+	for {
+		switch atomic.LoadInt32(&rf.state) {
+		case FOLLOWER:
+			select {
+			case <-rf.voteCh:
+				rf.electionTimer.Reset(randElectionDuration())
+			case <-rf.appendCh:
+				rf.electionTimer.Reset(randElectionDuration())
+			case <-rf.electionTimer.C:
+				rf.mu.Lock()
+				rf.updateStateTo(CANDIDATE)
+				rf.mu.Unlock()
 			}
+
+		case CANDIDATE:
+			rf.mu.Lock()
+			select {
+			// a candicate will not trigger voteCh
+			// because it has voted for itself
+			case <-rf.appendCh:
+				rf.updateStateTo(FOLLOWER)
+			case <-rf.electionTimer.C:
+				rf.electionTimer.Reset(randElectionDuration())
+				rf.startElection()
+			default:
+				// check if it has collected enough vote
+				if rf.voteAcquired > len(rf.peers)/2 {
+					rf.updateStateTo(LEADER)
+				}
+			}
+			rf.mu.Unlock()
+		case LEADER:
+			rf.broadcastAppendEntries()
+			time.Sleep(HEARTBEAT_INTERVAL * time.Millisecond)
 		}
-	}()
-
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
-
-
-	return rf
+	}
 }
 ```
 这个主循环实际就是实现了一张图：
@@ -122,56 +81,56 @@ Raft 算法的几个重要的思想也列举一下我的实现。
 
 主要是每个 raft 设置了一个 timer。初始化结束后就开始计时，然后进入主循环。此后在合适的时机 reset。
 ```go
-// rand[min, max]
-func randInt64InRange(min, max int64) int64 {
-	return min + rand.Int63n(max-min)
-}
-// init or reset timer
-func (rf *Raft) randResetTimer() {
-	if (rf.electionTimer == nil) {
-		rf.electionTimer = time.NewTimer(time.Duration(randInt64InRange(MIN_ELECTION_INTERVAL, MAX_ELECTION_INTERVAL)) * time.Millisecond)
-	} else {
-		rf.electionTimer.Reset(time.Duration(randInt64InRange(MIN_ELECTION_INTERVAL, MAX_ELECTION_INTERVAL)) * time.Millisecond)
-	}
+func randElectionDuration() time.Duration {
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	return time.Millisecond * time.Duration(r.Int63n(MAX_ELECTION_INTERVAL-MIN_ELECTION_INTERVAL)+MIN_ELECTION_INTERVAL)
 }
 ```
 
 2. **CANDIDATE 开启投票以及处理投票结果**
+在修改 rf 的变量时，需要注意线程安全。使用互斥锁或者原子操作。
+
+选举逻辑：
+1. 进入下一term
+2. 投票给自己，并且重置收到的选票
+3. 设定选举持续时间
+4. 要求所有其他 server 投票
+```go
+func (rf *Raft) startElection() {
+	// should always been protected by lock
+
+	rf.incrementTerm()
+	rf.votedFor = rf.me
+	rf.voteAcquired = 1
+	rf.electionTimer.Reset(randElectionDuration())
+	rf.broadcastVoteReq()
+}
+```
 
 注意所有的 RPC 都应该是并发的。
 ```go
-func (rf *Raft) startElection() {
-	// this function is called when a follower becomes a candidate
-	rf.mu.Lock()
-	rf.currentTerm += 1
-	rf.votedFor = rf.me	// vote for self
-	rf.voteCount = 1
-	rf.randResetTimer()	// reset timer
-	rf.mu.Unlock()
-	args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me}
-
-	for i,_ := range rf.peers {
-		// skip self
-		if (i == rf.me) {
+func (rf *Raft) broadcastVoteReq() {
+	args := RequestVoteArgs{Term: atomic.LoadInt32(&rf.currentTerm), CandidateId: rf.me}
+	for i, _ := range rf.peers {
+		if i == rf.me {
 			continue
 		}
-		// every reply is different, so put it in goroutine
-		go func (server int)  {
+		go func(server int) {
 			var reply RequestVoteReply
-			if (rf.sendRequestVote(server, &args, &reply)) {
+			if rf.isState(CANDIDATE) && rf.sendRequestVote(server, &args, &reply) {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+
 				if reply.VoteGranted == true {
-					rf.mu.Lock()
-					rf.voteCount += 1
-					rf.mu.Unlock()
+					rf.voteAcquired += 1
 				} else {
-					// response contains Term > currentTerm
-					if (reply.Term > rf.currentTerm) {
-						rf.mu.Lock()
+					if reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
 						rf.updateStateTo(FOLLOWER)
-						rf.mu.Unlock()
 					}
 				}
+			} else {
+				fmt.Printf("Server %d send vote req failed.\n", rf.me)
 			}
 		}(i)
 	}
@@ -182,36 +141,26 @@ func (rf *Raft) startElection() {
 ```go
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	/*
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	*/
-	// 收到了过时的信息
-	if (args.Term < rf.currentTerm) {
+	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
-		return
-	}
-	// 收到了新 term 的信息
-	if (args.Term > rf.currentTerm) {
+	} else if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.updateStateTo(FOLLOWER)
-		// 易错点
-		// if it's a new term, just vote for the first candidate
-		rf.votedFor = args.CandidateId
-	}
-	reply.Term = rf.currentTerm
-
-	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
-		// first come first served
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
-		go func() {
-			DPrintf("server %d received RequestVote from CANDIDATE %d, vote for %d\n", rf.me, args.CandidateId, rf.votedFor)
-			rf.voteCh <- true
-		}()
 	} else {
-		reply.VoteGranted = false
+		if rf.votedFor == -1 {
+			rf.votedFor = args.CandidateId
+			reply.VoteGranted = true
+		} else {
+			reply.VoteGranted = false
+		}
+	}
+	if reply.VoteGranted == true {
+		go func() { rf.voteCh <- struct{}{} }()
 	}
 }
 ```
@@ -221,23 +170,22 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 由于还没有加入 log，这里的逻辑还是很简单的。
 ```go
 func (rf *Raft) broadcastAppendEntries() {
-	args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me}
-	for i,_ := range rf.peers {
-		if (i == rf.me) {
-			// skip self
+	args := AppendEntriesArgs{Term: atomic.LoadInt32(&rf.currentTerm), LeaderId: rf.me}
+	for i, _ := range rf.peers {
+		if i == rf.me {
 			continue
 		}
-		go func (server int) {
+		go func(server int) {
 			var reply AppendEntriesReply
-			if rf.sendAppendEntries(server, &args, &reply) {
+			if rf.isState(LEADER) && rf.sendAppendEntries(server, &args, &reply) {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
 				if reply.Success == true {
 
 				} else {
-					if (reply.Term > rf.currentTerm) {
-						rf.mu.Lock()
+					if reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
 						rf.updateStateTo(FOLLOWER)
-						rf.mu.Unlock()
 					}
 				}
 			}
@@ -249,80 +197,56 @@ func (rf *Raft) broadcastAppendEntries() {
 5. **收到心跳包的处理逻辑**
 ```go
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	// 收到过时信息
-	if (args.Term < rf.currentTerm) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if args.Term < rf.currentTerm {
 		reply.Success = false
 		reply.Term = rf.currentTerm
-		return
-	}
-	// 收到新 term 信息
-	if (args.Term > rf.currentTerm) {
+	} else if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.updateStateTo(FOLLOWER)
+		reply.Success = true
+	} else {
+		reply.Success = true
 	}
-	reply.Success = true
-	reply.Term = rf.currentTerm
-	go func() {
-		DPrintf("server %d(Term = %d) received AppendEntries from LEADER %d(Term = %d)\n",
-						 rf.me, rf.currentTerm, args.LeaderId, args.Term)
-		rf.appendCh <- true
-	}()
+	go func() { rf.appendCh <- struct{}{} }()
 }
 ```
 
-注意，以上实现都没有牵涉到 log。运行 `go test -run 2A` 测试结果如下。
+注意，以上实现都没有牵涉到 log。运行 `go test -run 2A` 测试通过。
 ```
 Test (2A): initial election ...
-In term 0: Server 0 transfer from FOLLOWER to CANDIDATE
-server 0 become CANDIDATE, term = 1
-server 0 got 2 out of 3 vote, become LEADER, term = 1
-In term 1: Server 0 transfer from CANDIDATE to LEADER
+In term 1: Server 1 transfer from FOLLOWER to CANDIDATE
+In term 1: Server 1 transfer from CANDIDATE to LEADER
   ... Passed
 Test (2A): election after network failure ...
-In term 0: Server 0 transfer from FOLLOWER to CANDIDATE
-server 0 become CANDIDATE, term = 1
-In term 0: Server 2 transfer from FOLLOWER to CANDIDATE
-server 2 become CANDIDATE, term = 1
-server 0 got 2 out of 3 vote, become LEADER, term = 1
+In term 1: Server 0 transfer from FOLLOWER to CANDIDATE
 In term 1: Server 0 transfer from CANDIDATE to LEADER
-In term 1: Server 2 transfer from CANDIDATE to FOLLOWER
-********** Leader 0 disconnect... **********
-In term 1: Server 1 transfer from FOLLOWER to CANDIDATE
-server 1 become CANDIDATE, term = 2
-server 1 got 2 out of 3 vote, become LEADER, term = 2
-In term 2: Server 1 transfer from CANDIDATE to LEADER
-********** Leader 0 reconnect... **********
+In term 2: Server 2 transfer from FOLLOWER to CANDIDATE
+In term 2: Server 2 transfer from CANDIDATE to LEADER
 In term 2: Server 0 transfer from LEADER to FOLLOWER
-In term 2: Server 0 transfer from FOLLOWER to CANDIDATE
-server 0 become CANDIDATE, term = 3
-In term 3: Server 1 transfer from LEADER to FOLLOWER
-server 0 got 2 out of 3 vote, become LEADER, term = 3
-In term 3: Server 0 transfer from CANDIDATE to LEADER
-********** No quorum...no leader **********
-In term 3: Server 1 transfer from FOLLOWER to CANDIDATE
-server 1 become CANDIDATE, term = 4
-In term 3: Server 2 transfer from FOLLOWER to CANDIDATE
-server 2 become CANDIDATE, term = 4
-********** Quorum arise...one leader **********
-In term 8: Server 1 transfer from CANDIDATE to FOLLOWER
-server 2 got 2 out of 3 vote, become LEADER, term = 8
-In term 8: Server 2 transfer from CANDIDATE to LEADER
-********** Re-join node...one leader **********
-In term 8: Server 0 transfer from LEADER to FOLLOWER
-In term 8: Server 0 transfer from FOLLOWER to CANDIDATE
-server 0 become CANDIDATE, term = 9
-In term 9: Server 2 transfer from LEADER to FOLLOWER
-server 0 got 2 out of 3 vote, become LEADER, term = 9
+In term 3: Server 0 transfer from FOLLOWER to CANDIDATE
+In term 3: Server 0 transfer from CANDIDATE to FOLLOWER
+Server 0 send vote req failed.
+In term 3: Server 2 transfer from LEADER to FOLLOWER
+In term 4: Server 1 transfer from FOLLOWER to CANDIDATE
+In term 4: Server 0 transfer from FOLLOWER to CANDIDATE
+In term 4: Server 1 transfer from CANDIDATE to LEADER
+In term 4: Server 0 transfer from CANDIDATE to FOLLOWER
+In term 5: Server 0 transfer from FOLLOWER to CANDIDATE
+In term 5: Server 2 transfer from FOLLOWER to CANDIDATE
+Server 0 send vote req failed.
+In term 9: Server 2 transfer from CANDIDATE to FOLLOWER
 In term 9: Server 0 transfer from CANDIDATE to LEADER
-In term 9: Server 2 transfer from FOLLOWER to CANDIDATE
-server 2 become CANDIDATE, term = 10
+In term 9: Server 1 transfer from LEADER to FOLLOWER
+In term 10: Server 1 transfer from FOLLOWER to CANDIDATE
 In term 10: Server 0 transfer from LEADER to FOLLOWER
-server 2 got 2 out of 3 vote, become LEADER, term = 10
-In term 10: Server 2 transfer from CANDIDATE to LEADER
-  ... Passed
-PASS
-ok  	raft	7.022s
+In term 10: Server 1 transfer from CANDIDATE to LEADER
+Server 2 send vote req failed.
+Server 2 send vote req failed.
 ```
+
 
 个人总结
 ---
@@ -333,23 +257,28 @@ ok  	raft	7.022s
 
 一个调试小技巧，修改状态用一个函数实现，可以观察每次状态变化，非常有利于调试。
 ```go
-func (rf *Raft) updateStateTo(state int) {
-	if (state == rf.state) {
+func (rf *Raft) updateStateTo(state int32) {
+	// should always been protected by lock
+
+	if rf.isState(state) {
 		return
 	}
 	stateDesc := []string{"FOLLOWER", "CANDIDATE", "LEADER"}
 	preState := rf.state
+
 	switch state {
 	case FOLLOWER:
 		rf.state = FOLLOWER
+		rf.votedFor = -1 // prepare for next election
 	case CANDIDATE:
 		rf.state = CANDIDATE
+		rf.startElection()
 	case LEADER:
 		rf.state = LEADER
 	default:
 		fmt.Printf("Warning: invalid state %d, do nothing.\n", state)
 	}
 	fmt.Printf("In term %d: Server %d transfer from %s to %s\n",
-		 				rf.currentTerm, rf.me, stateDesc[preState], stateDesc[rf.state])
+		rf.currentTerm, rf.me, stateDesc[preState], stateDesc[rf.state])
 }
 ```
