@@ -17,16 +17,27 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "labrpc"
+import (
+	"fmt"
+	"labrpc"
+	"math/rand"
+	"sync"
+	"time"
+
+	"sync/atomic"
+)
 
 // import "bytes"
 // import "encoding/gob"
 
-import (
-	"fmt"
-	"math/rand"
-	"time"
+const (
+	FOLLOWER = iota
+	CANDIDATE
+	LEADER
+
+	HEARTBEAT_INTERVAL    = 100
+	MIN_ELECTION_INTERVAL = 400
+	MAX_ELECTION_INTERVAL = 500
 )
 
 //
@@ -41,16 +52,6 @@ type ApplyMsg struct {
 	Snapshot    []byte // ignore for lab2; only used in lab3
 }
 
-const (
-	FOLLOWER = iota
-	CANDIDATE
-	LEADER
-
-	HEARTBEAT_INTERVAL    = 100 * time.Millisecond
-	MIN_ELECTION_INTERVAL = 400
-	MAX_ELECTION_INTERVAL = 500
-)
-
 //
 // A Go object implementing a single Raft peer.
 //
@@ -63,19 +64,27 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	votedFor     int
+	voteAcquired int
+	state        int32
+	currentTerm  int32
 
-	// persistent state
-	currentTerm int // 当前任期
-	votedFor    int // 投票给了谁
+	electionTimer *time.Timer
+	voteCh        chan struct{} // 成功投票的信号
+	appendCh      chan struct{} // 成功更新 log 的信号
+}
 
-	state int // 目前自己是 FOLLOWER, CANDIDATE 还是 LEADER
+// atomic operations
+func (rf *Raft) getTerm() int32 {
+	return atomic.LoadInt32(&rf.currentTerm)
+}
 
-	electionTimer *time.Timer // timer
+func (rf *Raft) incrementTerm() {
+	atomic.AddInt32(&rf.currentTerm, 1)
+}
 
-	appendCh chan bool
-	voteCh   chan bool
-
-	voteCount int // rf.me 收到的选票
+func (rf *Raft) isState(state int32) bool {
+	return atomic.LoadInt32(&rf.state) == state
 }
 
 // return currentTerm and whether this server
@@ -85,10 +94,8 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
-	term = rf.currentTerm
-	if rf.state == LEADER {
-		isleader = true
-	}
+	term = int(rf.getTerm())
+	isleader = rf.isState(LEADER)
 	return term, isleader
 }
 
@@ -129,7 +136,7 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Term        int
+	Term        int32
 	CandidateId int
 }
 
@@ -139,8 +146,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	Term        int
-	VoteGranted bool // 收到了对CandidateId的投票
+	Term        int32
+	VoteGranted bool
 }
 
 //
@@ -148,78 +155,54 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	// 在这里加锁导致死锁
-	// 因为这个 goroutine 想要往 votech 里写东西
-	// 而 Make 中的 goroutine 想要读
-	/*
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-	*/
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
-		return
-	}
-
-	if args.Term > rf.currentTerm {
+	} else if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.updateStateTo(FOLLOWER)
-		// if it's a new term, just vote for the first candidate
-		rf.votedFor = args.CandidateId
-	}
-	reply.Term = rf.currentTerm
-
-	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-		// first come first served
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
-		go func() {
-			DPrintf("server %d received RequestVote from CANDIDATE %d, vote for %d\n", rf.me, args.CandidateId, rf.votedFor)
-			rf.voteCh <- true
-		}()
 	} else {
-		reply.VoteGranted = false
+		if rf.votedFor == -1 {
+			rf.votedFor = args.CandidateId
+			reply.VoteGranted = true
+		} else {
+			reply.VoteGranted = false
+		}
+	}
+	if reply.VoteGranted == true {
+		go func() { rf.voteCh <- struct{}{} }()
 	}
 }
 
-/*****************
- * AppendEntries *
- *****************/
-
 type AppendEntriesArgs struct {
-	Term     int
+	Term     int32
 	LeaderId int
 }
 
 type AppendEntriesReply struct {
-	Term    int
+	Term    int32
 	Success bool
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		reply.Term = rf.currentTerm
-		return
-	}
-	if args.Term > rf.currentTerm {
+	} else if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.updateStateTo(FOLLOWER)
+		reply.Success = true
+	} else {
+		reply.Success = true
 	}
-	reply.Success = true
-	reply.Term = rf.currentTerm
-	go func() {
-		DPrintf("server %d(Term = %d) received AppendEntries from LEADER %d(Term = %d)\n",
-			rf.me, rf.currentTerm, args.LeaderId, args.Term)
-		rf.appendCh <- true
-	}()
-
-}
-
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
+	go func() { rf.appendCh <- struct{}{} }()
 }
 
 //
@@ -253,6 +236,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -300,19 +287,6 @@ func (rf *Raft) Kill() {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-
-func randInt64InRange(min, max int64) int64 {
-	return min + rand.Int63n(max-min)
-}
-
-func (rf *Raft) randResetTimer() {
-	if rf.electionTimer == nil {
-		rf.electionTimer = time.NewTimer(time.Duration(randInt64InRange(MIN_ELECTION_INTERVAL, MAX_ELECTION_INTERVAL)) * time.Millisecond)
-	} else {
-		rf.electionTimer.Reset(time.Duration(randInt64InRange(MIN_ELECTION_INTERVAL, MAX_ELECTION_INTERVAL)) * time.Millisecond)
-	}
-}
-
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
@@ -321,148 +295,40 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	// 设为 -1，因为 server 编号从 0 开始
-	rf.votedFor = -1
 	rf.state = FOLLOWER
-	// 必须初始化，即使是无缓冲的 channel
-	// 否则一直无法收到数据
-	rf.appendCh = make(chan bool)
-	rf.voteCh = make(chan bool)
-
-	rf.randResetTimer()
-	go func() {
-		for {
-			switch rf.state {
-			case FOLLOWER:
-				select {
-				// 阻塞直到其中一个 case 成立
-				case <-rf.appendCh:
-					DPrintf("received append request, reset timer for server %d.\n", rf.me)
-					rf.randResetTimer()
-				case <-rf.voteCh:
-					DPrintf("received vote request, reset timer for server %d.\n", rf.me)
-					rf.randResetTimer()
-				case <-rf.electionTimer.C:
-					// 超时
-					rf.updateStateTo(CANDIDATE)
-					rf.startElection()
-					fmt.Printf("server %d become CANDIDATE, term = %d\n", rf.me, rf.currentTerm)
-				}
-			case CANDIDATE:
-				select {
-				case <-rf.appendCh:
-					// 其他服务器已经成为 LEADER
-					DPrintf("server %d become FOLLOWER", rf.me)
-					rf.updateStateTo(FOLLOWER)
-				case <-rf.electionTimer.C:
-					// 超时，新一轮选举
-					DPrintf("New Election Started...")
-					rf.startElection()
-				default:
-					// avoid race
-					// if (rf.voteCount > len(rf.peers)/2) {
-					var win bool
-					rf.mu.Lock()
-					if rf.voteCount > len(rf.peers)/2 {
-						win = true
-					}
-					rf.mu.Unlock()
-					if win == true {
-						// 赢得选举
-						fmt.Printf("server %d got %d out of %d vote, become LEADER, term = %d\n",
-							rf.me, rf.voteCount, len(rf.peers), rf.currentTerm)
-						rf.updateStateTo(LEADER)
-						// rf.maintainAuthority()
-					} else {
-						// DPrintf("server %d only got %d out of %d vote ,remain CANDIDATE\n", rf.me, rf.voteCount, len(rf.peers))
-					}
-				}
-			case LEADER:
-				rf.broadcastAppendEntries()
-				time.Sleep(HEARTBEAT_INTERVAL)
-			}
-		}
-	}()
+	rf.votedFor = -1 // init with -1, because server id start from 0
+	rf.voteCh = make(chan struct{})
+	rf.appendCh = make(chan struct{})
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	go rf.startLoop()
+
 	return rf
 }
 
-func (rf *Raft) startElection() {
-	// this function is called when a follower becomes a candidate
-	rf.mu.Lock()
-	rf.currentTerm += 1
-	rf.votedFor = rf.me // vote for self
-	rf.voteCount = 1
-	rf.randResetTimer() // reset timer
-	rf.mu.Unlock()
-	args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me}
-
-	for i, _ := range rf.peers {
-		// skip self
-		if i == rf.me {
-			continue
-		}
-		// every reply is different, so put it in goroutine
-		go func(server int) {
-			var reply RequestVoteReply
-			if rf.sendRequestVote(server, &args, &reply) {
-				if reply.VoteGranted == true {
-					rf.mu.Lock()
-					rf.voteCount += 1
-					rf.mu.Unlock()
-				} else {
-					// response contains Term > currentTerm
-					if reply.Term > rf.currentTerm {
-						rf.mu.Lock()
-						rf.currentTerm = reply.Term
-						rf.updateStateTo(FOLLOWER)
-						rf.mu.Unlock()
-					}
-				}
-			}
-		}(i)
-	}
+func randElectionDuration() time.Duration {
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	return time.Millisecond * time.Duration(r.Int63n(MAX_ELECTION_INTERVAL-MIN_ELECTION_INTERVAL)+MIN_ELECTION_INTERVAL)
 }
 
-func (rf *Raft) broadcastAppendEntries() {
-	args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me}
-	for i, _ := range rf.peers {
-		if i == rf.me {
-			// skip self
-			continue
-		}
-		go func(server int) {
-			var reply AppendEntriesReply
-			if rf.sendAppendEntries(server, &args, &reply) {
-				if reply.Success == true {
+func (rf *Raft) updateStateTo(state int32) {
+	// should always been protected by lock
 
-				} else {
-					if reply.Term > rf.currentTerm {
-						rf.mu.Lock()
-						rf.currentTerm = reply.Term
-						rf.updateStateTo(FOLLOWER)
-						rf.mu.Unlock()
-					}
-				}
-			}
-		}(i)
-	}
-}
-
-func (rf *Raft) updateStateTo(state int) {
-	if state == rf.state {
+	if rf.isState(state) {
 		return
 	}
 	stateDesc := []string{"FOLLOWER", "CANDIDATE", "LEADER"}
 	preState := rf.state
+
 	switch state {
 	case FOLLOWER:
 		rf.state = FOLLOWER
+		rf.votedFor = -1 // prepare for next election
 	case CANDIDATE:
 		rf.state = CANDIDATE
+		rf.startElection()
 	case LEADER:
 		rf.state = LEADER
 	default:
@@ -470,4 +336,105 @@ func (rf *Raft) updateStateTo(state int) {
 	}
 	fmt.Printf("In term %d: Server %d transfer from %s to %s\n",
 		rf.currentTerm, rf.me, stateDesc[preState], stateDesc[rf.state])
+}
+
+func (rf *Raft) startElection() {
+	// should always been protected by lock
+
+	rf.incrementTerm()
+	rf.votedFor = rf.me
+	rf.voteAcquired = 1
+	rf.electionTimer.Reset(randElectionDuration())
+	rf.broadcastVoteReq()
+}
+
+func (rf *Raft) broadcastVoteReq() {
+	args := RequestVoteArgs{Term: atomic.LoadInt32(&rf.currentTerm), CandidateId: rf.me}
+	for i, _ := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		go func(server int) {
+			var reply RequestVoteReply
+			if rf.isState(CANDIDATE) && rf.sendRequestVote(server, &args, &reply) {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+
+				if reply.VoteGranted == true {
+					rf.voteAcquired += 1
+				} else {
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+						rf.updateStateTo(FOLLOWER)
+					}
+				}
+			} else {
+				fmt.Printf("Server %d send vote req failed.\n", rf.me)
+			}
+		}(i)
+	}
+}
+
+func (rf *Raft) broadcastAppendEntries() {
+	args := AppendEntriesArgs{Term: atomic.LoadInt32(&rf.currentTerm), LeaderId: rf.me}
+	for i, _ := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		go func(server int) {
+			var reply AppendEntriesReply
+			if rf.isState(LEADER) && rf.sendAppendEntries(server, &args, &reply) {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if reply.Success == true {
+
+				} else {
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+						rf.updateStateTo(FOLLOWER)
+					}
+				}
+			}
+		}(i)
+	}
+}
+
+func (rf *Raft) startLoop() {
+	rf.electionTimer = time.NewTimer(randElectionDuration())
+	for {
+		switch atomic.LoadInt32(&rf.state) {
+		case FOLLOWER:
+			select {
+			case <-rf.voteCh:
+				rf.electionTimer.Reset(randElectionDuration())
+			case <-rf.appendCh:
+				rf.electionTimer.Reset(randElectionDuration())
+			case <-rf.electionTimer.C:
+				rf.mu.Lock()
+				rf.updateStateTo(CANDIDATE)
+				rf.mu.Unlock()
+			}
+
+		case CANDIDATE:
+			rf.mu.Lock()
+			select {
+			// a candicate will not trigger voteCh
+			// because it has voted for itself
+			case <-rf.appendCh:
+				rf.updateStateTo(FOLLOWER)
+			case <-rf.electionTimer.C:
+				rf.electionTimer.Reset(randElectionDuration())
+				rf.startElection()
+			default:
+				// check if it has collected enough vote
+				if rf.voteAcquired > len(rf.peers)/2 {
+					rf.updateStateTo(LEADER)
+				}
+			}
+			rf.mu.Unlock()
+		case LEADER:
+			rf.broadcastAppendEntries()
+			time.Sleep(HEARTBEAT_INTERVAL * time.Millisecond)
+		}
+	}
 }
