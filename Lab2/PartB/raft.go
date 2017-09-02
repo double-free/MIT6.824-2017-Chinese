@@ -220,6 +220,8 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int32
 	Success bool
+	// optimization
+	NextTrial int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -244,8 +246,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// log
-	if args.PrevLogIndex > rf.getLastLogIndex() || args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
+	if args.PrevLogIndex > rf.getLastLogIndex() {
 		reply.Success = false
+		// optimization
+		reply.NextTrial = rf.getLastLogIndex() + 1
+		return
+	}
+
+	if args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
+		reply.Success = false
+		// optimization
+		badTerm := rf.log[args.PrevLogIndex].Term
+		i := args.PrevLogIndex
+		for ; rf.log[i].Term == badTerm; i-- {
+		}
+		reply.NextTrial = i + 1
 		return
 	}
 
@@ -506,7 +521,7 @@ func (rf *Raft) broadcastAppendEntries() {
 					rf.updateStateTo(FOLLOWER)
 				} else {
 					// log 不匹配
-					rf.nextIndex[server] -= 1
+					rf.nextIndex[server] = reply.NextTrial
 					return true
 				}
 			}
