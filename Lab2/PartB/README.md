@@ -234,54 +234,60 @@ args.LastLogTerm = rf.log[rf.lastLogIndex()].Term
 分析 log 发现旧的 Leader (假设为 leader0) 重连后改变了某个 Follower 的 log，这本来是不该发生的。查错发现，leader0 重连后，由于自身状态还是 Leader，会发送心跳包。第一个心跳包返回后，会修改 leader0 的 Term 为现在的 term，并将其转为 follower。然而，由于并发，另一个心跳包返回时，该 leader 的currentTerm 已经是最新了，而由于这时没有判断 state == LEADER，所以直接进入了 log 复制环节。
 ```go
 func (rf *Raft) broadcastAppendEntries() {
-	for i, _ := range rf.peers {
-		if rf.state != LEADER {
-			// 状态随时都可能被其他 goroutine 修改
-			return
+	sendAppendEntriesTo := func(server int) bool {
+		// 该函数返回 true 代表需要重试，否则返回false
+		var args AppendEntriesArgs
+		rf.mu.Lock()
+		args.Term = rf.currentTerm
+		args.LeaderId = rf.me
+		args.LeaderCommit = rf.commitIndex
+		args.PrevLogIndex = rf.nextIndex[server] - 1
+		args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+		if rf.getLastLogIndex() >= rf.nextIndex[server] {
+			args.Entries = rf.log[rf.nextIndex[server]:]
 		}
+		rf.mu.Unlock()
+
+		var reply AppendEntriesReply
+
+		// 发送是并行的
+		if rf.isState(LEADER) && rf.sendAppendEntries(server, &args, &reply) {
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			if reply.Success == true {
+				rf.nextIndex[server] += len(args.Entries)
+				rf.matchIndex[server] = rf.nextIndex[server] - 1
+			} else {
+				// ****** 易错点 ******
+				// 由于并行发送，可能收到多个回复
+				// 如果已经在之前的回复中失去了 LEADER 身份
+				// 则直接不处理其他回复了
+				if rf.state != LEADER {
+					return false
+				}
+
+				if reply.Term > rf.currentTerm {
+					// term 不匹配
+					rf.currentTerm = reply.Term
+					rf.updateStateTo(FOLLOWER)
+				} else {
+					// log 不匹配
+					rf.nextIndex[server] -= 1
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for i, _ := range rf.peers {
 		if i == rf.me {
-			// skip self
 			continue
 		}
 		go func(server int) {
-			args := AppendEntriesArgs{}
-			reply := AppendEntriesReply{}
-		LOOP:
-			args.Term = rf.currentTerm
-			args.LeaderId = rf.me
-			args.PrevLogIndex = rf.nextIndex[server] - 1
-			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
-			args.LeaderCommit = rf.commitIndex
-			if rf.lastLogIndex() >= rf.nextIndex[server] {
-				args.Entries = rf.log[rf.nextIndex[server]:]
-			}
-			// fmt.Printf("Current Leader log: %s\n", rf.logToString())
-			if rf.sendAppendEntries(server, &args, &reply) {
-				// fmt.Printf("Leader %d send heartbeat to %d\n", rf.me, server)
-				if reply.Success == true {
-					rf.nextIndex[server] += len(args.Entries)
-					rf.matchIndex[server] = rf.nextIndex[server] - 1
-				} else {
-					if reply.Term > rf.currentTerm {
-						// fail because of outdate
-						rf.mu.Lock()
-						rf.currentTerm = reply.Term
-						rf.updateStateTo(FOLLOWER)
-						rf.mu.Unlock()
-					}
-					// 非常关键的判断，不加会导致过时的 Leader 仍然能进行 log replication
-					if rf.state != LEADER {
-						return
-					}
-					// 如果返回 false, 而且不是因为 Term 过时，则肯定是 log 不匹配
-					// fail because of log inconsistency
-					// decrement nextIndex and retry
-					rf.nextIndex[server] -= 1
-					DPrintf("Leader %d: duplicate to follower %d failed, retry from %d...\n", rf.me, server, rf.nextIndex[server])
-					goto LOOP
+			for {
+				if sendAppendEntriesTo(server) == false {
+					break
 				}
-			} else {
-				// DPrintf("Network Error, Leader %d cannot reach server %d\n", rf.me, server)
 			}
 		}(i)
 	}
