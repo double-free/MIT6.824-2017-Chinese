@@ -271,7 +271,7 @@ func (rf *Raft) broadcastAppendEntries() {
 }
 ```
 
-7. **有时无法通过 TestBackup2B**
+6. **有时无法通过 TestBackup2B**
 
 偶尔才出现，不好排查。暂时作为遗留问题。
 如下：
