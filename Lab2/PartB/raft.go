@@ -254,9 +254,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// 长度不够，肯定不匹配
 		conflictIdx = args.PrevLogIndex + 1
 	} else {
-		for idx := args.PrevLogIndex + 1; idx <= args.PrevLogIndex+len(args.Entries); idx++ {
-			if rf.log[idx].Term != args.Entries[idx-args.PrevLogIndex-1].Term {
-				conflictIdx = idx
+		for idx := 0; idx < len(args.Entries); idx++ {
+			if rf.log[idx+args.PrevLogIndex+1].Term != args.Entries[idx].Term {
+				conflictIdx = idx + args.PrevLogIndex + 1
 				break
 			}
 		}
