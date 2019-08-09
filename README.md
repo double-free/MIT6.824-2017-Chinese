@@ -17,3 +17,10 @@
 - [x] **Lab1: mapreduce**
 - [ ] **Lab2: Raft (Part C 施工中)**
 - [ ] **Lab3: KV Raft**
+
+通知
+---
+该项目已不再维护，请移步重写后的版本[MIT6.824-2018-Chinese](https://github.com/double-free/MIT6.824-2018-Chinese)，主要优化：
+
+- 几个工作协程的设计更为合理
+- 解决了所有 race condition，修复了几率性 fail 的情况
